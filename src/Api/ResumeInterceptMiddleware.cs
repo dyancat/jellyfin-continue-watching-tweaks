@@ -57,6 +57,13 @@ public class ResumeInterceptMiddleware
         var pluginConfiguration = Plugin.Instance?.Configuration ?? new PluginConfiguration();
         var isGetRequest = string.Equals(context.Request.Method, "GET", StringComparison.OrdinalIgnoreCase);
 
+        if (IsInfuse(context.Request))
+        {
+            _logger.LogInformation(
+                "[ContinueWatchingTweaks] {Path} UserAgent={UserAgent} requested",
+                context.Request.Path,
+                context.Request.Headers.UserAgent.ToString());
+        }
         if (!pluginConfiguration.Enabled || !isGetRequest ||
             pluginConfiguration.ApplyToInfuseOnly && !IsInfuse(context.Request))
         {
@@ -133,6 +140,8 @@ public class ResumeInterceptMiddleware
         var dtoOptions = BuildDtoOptions(requestedFields, enableImages, imageTypeLimit, enabledImageTypes,
             enableUserData);
 
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
         // 1. Continue Watching: items the user has partially played (folders excluded)
         var continueWatchingItems = libraryManager.GetItemList(new InternalItemsQuery(user)
         {
@@ -143,6 +152,8 @@ public class ResumeInterceptMiddleware
             Recursive = true,
             DtoOptions = dtoOptions,
         }).ToList();
+
+        _logger.LogInformation("[ContinueWatchingTweaks] continue watching done at {Milliseconds} ms", stopwatch.ElapsedMilliseconds);
 
         // 2. Next Up: optionally skip series that already have an in-progress episode
         var seriesIdsInContinueWatching = continueWatchingItems
@@ -159,6 +170,7 @@ public class ResumeInterceptMiddleware
                            || item is not Episode nextUpCandidate
                            || !seriesIdsInContinueWatching.Contains(nextUpCandidate.SeriesId))
             .ToList();
+        _logger.LogInformation("[ContinueWatchingTweaks] next up done at {Milliseconds} ms", stopwatch.ElapsedMilliseconds);
 
         // 3. Last finished episode per Next Up series, from one batched lookup.
         var nextUpEpisodes = nextUpItems.OfType<Episode>().ToList();
@@ -197,6 +209,7 @@ public class ResumeInterceptMiddleware
         }
 
         var nextUpItemIds = nextUpItems.Select(item => item.Id).ToHashSet();
+        _logger.LogInformation("[ContinueWatchingTweaks] nextUpItemIds done at {Milliseconds} ms", stopwatch.ElapsedMilliseconds);
 
         // 4. Merge. All dates come from one user data batch.
         IEnumerable<BaseItem> GetVersions(BaseItem item)
@@ -234,9 +247,14 @@ public class ResumeInterceptMiddleware
                     ? GetSeriesLastPlayedDate(seriesLastWatchedEpisode)
                     : DateTime.MinValue;
 
-            return pluginConfiguration.SortNextUpByEpisodeAddedDate && item.DateCreated > seriesLastPlayedDate
-                ? item.DateCreated
-                : seriesLastPlayedDate;
+            if (!pluginConfiguration.SortNextUpByEpisodePremiereDate
+                || item.PremiereDate is not { } premiereDate
+                || premiereDate > DateTime.UtcNow)
+            {
+                return seriesLastPlayedDate;
+            }
+
+            return premiereDate > seriesLastPlayedDate ? premiereDate : seriesLastPlayedDate;
         }
 
         // Each sort date is computed once and reused for the ordering and the response.
@@ -249,6 +267,7 @@ public class ResumeInterceptMiddleware
             .Concat(nextUpItems)
             .OrderByDescending(item => sortDateByItemId[item.Id])
             .ToList();
+        _logger.LogInformation("[ContinueWatchingTweaks] sort and merge done at {Milliseconds} ms", stopwatch.ElapsedMilliseconds);
 
         _logger.LogDebug(
             "[ContinueWatchingTweaks] {Path}: {ContinueWatchingCount} continue-watching + {NextUpCount} next-up = {TotalCount} total",
@@ -276,6 +295,13 @@ public class ResumeInterceptMiddleware
             }
         }
 
+        _logger.LogInformation(
+            "[ContinueWatchingTweaks] {Path} UserAgent={UserAgent} returned {Count} items: {Items}",
+            context.Request.Path,
+            context.Request.Headers.UserAgent.ToString(),
+            itemDtos.Count,
+            string.Join(" | ", itemDtos.Select(dto => $"{dto.SeriesName} {dto.Name}".Trim())));
+
         var queryResult = new QueryResult<BaseItemDto>
         {
             Items = itemDtos,
@@ -289,6 +315,7 @@ public class ResumeInterceptMiddleware
 
         context.Response.ContentType = "application/json; charset=utf-8";
         var json = JsonSerializer.Serialize(queryResult, serializerOptions);
+        _logger.LogInformation("[ContinueWatchingTweaks] page and return done at {Milliseconds} ms", stopwatch.ElapsedMilliseconds);
         await context.Response.WriteAsync(json).ConfigureAwait(false);
     }
 
