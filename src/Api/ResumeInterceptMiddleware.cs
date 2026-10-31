@@ -248,8 +248,7 @@ public class ResumeInterceptMiddleware
                     : DateTime.MinValue;
 
             if (!pluginConfiguration.SortNextUpByEpisodePremiereDate
-                || item.PremiereDate is not { } premiereDate
-                || premiereDate > DateTime.UtcNow)
+                || item.PremiereDate is not { } premiereDate)
             {
                 return seriesLastPlayedDate;
             }
